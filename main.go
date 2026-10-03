@@ -11,7 +11,8 @@ import (
 	"golang.org/x/net/html"
 )
 
-const PageCountToVisit = 10
+const PageCountToVisit = 100
+const MaxConcurrentRequests = 100
 
 type URLSet struct {
 	visited map[string]struct{}
@@ -96,7 +97,7 @@ func parsePage(url string, body io.Reader) (ParsedPage, error) {
 
 }
 
-func fetchPage(url string, client *http.Client) (io.Reader, error) {
+func fetchPage(url string, client *http.Client) (io.ReadCloser, error) {
 
 	request, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -109,6 +110,7 @@ func fetchPage(url string, client *http.Client) (io.Reader, error) {
 	}
 
 	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
 		return nil, fmt.Errorf("failed to retrieve page: %s", response.Status)
 	}
 
@@ -129,40 +131,98 @@ func resolveURL(baseURL, relativeURL string) (string, error) {
 	}
 	return base.ResolveReference(target).String(), nil
 }
-
-func main() {
-
-	stack := make([]string, 0)
-	urlSet := NewURLSet()
-
-	// url stack -> fetchPage -> parsePage -> extract links -> url stack
-
-	stack = append(stack, "https://books.toscrape.com/")
-
-	client := &http.Client{}
-
-	for visitedPages := 0; len(stack) > 0 && visitedPages < PageCountToVisit; visitedPages++ {
-		page, err := fetchPage(stack[0], client)
-		if err != nil {
-			fmt.Printf("Error fetching page: %v\n", err)
-			return
-		}
-		parsedPage, err := parsePage(stack[0], page)
-		if err != nil {
-			fmt.Printf("Error parsing page: %v\n", err)
-		} else {
-			fmt.Println(parsedPage.Links)
-			fmt.Println(parsedPage.Text.String())
-
-		}
-		stack = stack[1:]
-
-		for _, link := range parsedPage.Links {
-			if urlSet.Add(link) {
-				stack = append(stack, link)
-			}
-		}
-
-		stack = append(stack, parsedPage.Links...)
+func validURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
 	}
+
+	return u.Scheme == "http" || u.Scheme == "https"
+}
+func main() {
+	client := &http.Client{}
+	jobs := make(chan string)
+	results := make(chan []string)
+
+	startURL := "https://books.toscrape.com/"
+
+	urlSet := NewURLSet()
+	urlSet.Add(startURL)
+
+	for range MaxConcurrentRequests {
+
+		go func() {
+
+			for pageURL := range jobs {
+
+				fmt.Printf("Visiting: %s\n", pageURL)
+
+				page, err := fetchPage(pageURL, client)
+				if err != nil {
+					fmt.Printf("Error fetching page: %v\n", err)
+					results <- nil
+					continue
+				}
+
+				parsedPage, err := parsePage(pageURL, page)
+				page.Close()
+				if err != nil {
+					fmt.Printf("Error parsing page: %v\n", err)
+					results <- nil
+					continue
+				}
+
+				// fmt.Println(parsedPage.Links)
+				// fmt.Println(parsedPage.Text.String())
+
+				var newLinks []string
+
+				for _, link := range parsedPage.Links {
+					if !validURL(link) {
+						continue
+					}
+
+					if urlSet.Add(link) {
+						newLinks = append(newLinks, link)
+					}
+				}
+
+				results <- newLinks
+			}
+
+		}()
+
+	}
+
+	queue := []string{startURL}
+
+	inFlight := 0
+	visitedCount := 0
+
+	for visitedCount < PageCountToVisit {
+
+		var jobsChan chan string
+		var nextURL string
+
+		if len(queue) > 0 && inFlight < MaxConcurrentRequests {
+			jobsChan = jobs
+			nextURL = queue[0]
+		}
+
+		select {
+		case jobsChan <- nextURL:
+			queue = queue[1:]
+			inFlight++
+		case newLinks := <-results:
+			inFlight--
+			visitedCount++
+			queue = append(queue, newLinks...)
+		}
+		if visitedCount >= PageCountToVisit {
+			break
+		}
+	}
+	close(jobs)
+
+	fmt.Printf("Visited %d pages\n", visitedCount)
 }
