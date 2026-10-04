@@ -13,10 +13,6 @@ import (
 	"golang.org/x/net/html"
 )
 
-const PageCountToVisit = 1_00
-const MaxConcurrentRequests = 10
-const Cooldown = 1
-
 type URLSet struct {
 	visited map[string]struct{}
 	mu      sync.Mutex
@@ -170,7 +166,7 @@ func fetchData(startURL string) []*ParsedPage {
 	urlSet := NewURLSet()
 	urlSet.Add(startURL)
 
-	for range MaxConcurrentRequests {
+	for range Config.Workers {
 
 		go func() {
 
@@ -209,7 +205,7 @@ func fetchData(startURL string) []*ParsedPage {
 				}
 
 				results <- &parsedPage
-				time.Sleep(time.Second * Cooldown)
+				time.Sleep(time.Second * time.Duration(Config.WorkerCooldown))
 			}
 
 		}()
@@ -217,17 +213,17 @@ func fetchData(startURL string) []*ParsedPage {
 	}
 
 	queue := []string{startURL}
-	resultsPages := make([]*ParsedPage, 0, PageCountToVisit)
+	resultsPages := make([]*ParsedPage, 0, Config.PagesCountToProcess)
 
 	inFlight := 0
 	visitedCount := 0
 
-	for visitedCount < PageCountToVisit {
+	for visitedCount < Config.PagesCountToProcess {
 
 		var jobsChan chan string
 		var nextURL string
 
-		if len(queue) > 0 && inFlight < MaxConcurrentRequests {
+		if len(queue) > 0 && inFlight < Config.MaxConcurrentRequests {
 			jobsChan = jobs
 			nextURL = queue[0]
 		}
@@ -250,7 +246,7 @@ func fetchData(startURL string) []*ParsedPage {
 			}
 
 		}
-		if visitedCount >= PageCountToVisit {
+		if visitedCount >= Config.PagesCountToProcess {
 			break
 		}
 	}
@@ -259,28 +255,28 @@ func fetchData(startURL string) []*ParsedPage {
 	return resultsPages
 }
 
+var Config config
+
 func main() {
 
-	startURL := "https://myanimelist.net/"
-	mongoConnectionString := "mongodb://admin:password123@localhost:27017/"
-	dbName := "WebScraper"
+	loadConfig("config.json")
 
 	ctx := context.Background()
-	dbClient, err := connectToMongoDB(mongoConnectionString)
+	dbClient, err := connectToMongoDB(Config.DB.ConnectionString)
 
 	if err != nil {
 		ErrorLog.Printf("Error connecting to mongo db: %s\n", err.Error())
 		return
 	}
 
-	db, err := createIndex(dbClient, dbName, ctx)
+	db, err := createIndex(dbClient, Config.DB.Name, ctx)
 
 	if err != nil {
 		ErrorLog.Printf("Error creating collection: %s\n", err.Error())
 		return
 	}
 
-	data := fetchData(startURL)
+	data := fetchData(Config.StartURL)
 	for _, page := range data {
 		err = insertParsedPage(db, ctx, page)
 		if err != nil {

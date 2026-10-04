@@ -1,0 +1,13 @@
+{
+    "db":{
+        "connectionString": "mongodb://admin:password123@localhost:27017/",
+        "name":"WebScraper",
+        "collectionName":"webpages"
+    },
+
+    "startURL": "https://myanimelist.net/",
+    "workers": 5,
+    "pagesCountToProcess": 100,
+    "maxConcurrentRequests": 10,
+    "workerCooldown": 1
+}
