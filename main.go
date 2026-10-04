@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -76,7 +75,7 @@ func parsePage(url string, body io.Reader) (ParsedPage, error) {
 					if attr.Key == "href" {
 						resolvedURL, err := resolveURL(page.Url, attr.Val)
 						if err != nil {
-							log.Printf("Error resolving URL: %v\n", err)
+							ErrorLog.Printf("Error resolving URL: %v\n", err)
 							continue
 						}
 						page.Links = append(page.Links, resolvedURL)
@@ -177,11 +176,11 @@ func fetchData(startURL string) []*ParsedPage {
 
 			for pageURL := range jobs {
 
-				log.Printf("Visiting: %s\n", pageURL)
+				InfoLog.Printf("Visiting: %s\n", pageURL)
 
 				page, err := fetchPage(pageURL, client)
 				if err != nil {
-					log.Printf("Error fetching page: %v\n", err)
+					ErrorLog.Printf("Error fetching page: %v\n", err)
 					results <- nil
 					continue
 				}
@@ -189,7 +188,7 @@ func fetchData(startURL string) []*ParsedPage {
 				parsedPage, err := parsePage(pageURL, page)
 				page.Close()
 				if err != nil {
-					log.Printf("Error parsing page: %v\n", err)
+					ErrorLog.Printf("Error parsing page: %v\n", err)
 					results <- nil
 					continue
 				}
@@ -270,24 +269,22 @@ func main() {
 	dbClient, err := connectToMongoDB(mongoConnectionString)
 
 	if err != nil {
-		log.Printf("Error connecting to mongo db: %s\n", err.Error())
+		ErrorLog.Printf("Error connecting to mongo db: %s\n", err.Error())
 		return
 	}
 
 	db, err := createIndex(dbClient, dbName, ctx)
 
 	if err != nil {
-		log.Printf("Error creating collection: %s\n", err.Error())
+		ErrorLog.Printf("Error creating collection: %s\n", err.Error())
 		return
 	}
-
-
 
 	data := fetchData(startURL)
 	for _, page := range data {
 		err = insertParsedPage(db, ctx, page)
 		if err != nil {
-			log.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
+			WarningLog.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
 		}
 	}
 
