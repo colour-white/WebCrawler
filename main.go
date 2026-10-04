@@ -8,12 +8,14 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/html"
 )
 
-const PageCountToVisit = 100
-const MaxConcurrentRequests = 5
+const PageCountToVisit = 1_000
+const MaxConcurrentRequests = 10
+const Cooldown = 1
 
 type URLSet struct {
 	visited map[string]struct{}
@@ -207,6 +209,7 @@ func fetchData(startURL string) []*ParsedPage {
 				}
 
 				results <- &parsedPage
+				time.Sleep(time.Second * Cooldown)
 			}
 
 		}()
@@ -257,7 +260,7 @@ func fetchData(startURL string) []*ParsedPage {
 }
 
 func main() {
-	data := fetchData("https://books.toscrape.com/")
+	data := fetchData("https://myanimelist.net/")
 	mongoConnectionString := "mongodb://admin:password123@localhost:27017/"
 	dbName := "WebScraper"
 	ctx := context.Background()

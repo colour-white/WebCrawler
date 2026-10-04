@@ -29,10 +29,6 @@ func createIndex(client *mongo.Client, dbName string, ctx context.Context) (*mon
 	_, err := webpages.Indexes().CreateOne(
 		ctx,
 		mongo.IndexModel{
-			// Keys: map[string]interface{}{
-			// 	"title":   "text",
-			// 	"content": "text",
-			// },
 			Keys: bson.D{
 				{Key: "title", Value: "text"},
 				{Key: "content", Value: "text"},
