@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -24,7 +25,13 @@ func connectToMongoDB(uri string) (*mongo.Client, error) {
 func createIndex(client *mongo.Client, dbName string, ctx context.Context) (*mongo.Database, error) {
 
 	db := client.Database(dbName)
-	webpages := db.Collection("webpages")
+	collectionName := "webpages"
+	webpages := db.Collection(collectionName)
+
+	if err := dropCollection(db, ctx, "webpages"); err != nil {
+		log.Printf("Error removing old data: %s\n", err.Error())
+		return nil, err
+	}
 
 	_, err := webpages.Indexes().CreateOne(
 		ctx,
@@ -55,4 +62,11 @@ func insertParsedPage(db *mongo.Database, ctx context.Context, page *ParsedPage)
 	})
 
 	return err
+}
+
+func dropCollection(db *mongo.Database, ctx context.Context, collectionName string) error {
+
+	collection := db.Collection(collectionName)
+	return collection.Drop(ctx)
+
 }

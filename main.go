@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,7 +14,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-const PageCountToVisit = 1_000
+const PageCountToVisit = 1_00
 const MaxConcurrentRequests = 10
 const Cooldown = 1
 
@@ -75,7 +76,7 @@ func parsePage(url string, body io.Reader) (ParsedPage, error) {
 					if attr.Key == "href" {
 						resolvedURL, err := resolveURL(page.Url, attr.Val)
 						if err != nil {
-							fmt.Printf("Error resolving URL: %v\n", err)
+							log.Printf("Error resolving URL: %v\n", err)
 							continue
 						}
 						page.Links = append(page.Links, resolvedURL)
@@ -176,11 +177,11 @@ func fetchData(startURL string) []*ParsedPage {
 
 			for pageURL := range jobs {
 
-				fmt.Printf("Visiting: %s\n", pageURL)
+				log.Printf("Visiting: %s\n", pageURL)
 
 				page, err := fetchPage(pageURL, client)
 				if err != nil {
-					fmt.Printf("Error fetching page: %v\n", err)
+					log.Printf("Error fetching page: %v\n", err)
 					results <- nil
 					continue
 				}
@@ -188,13 +189,13 @@ func fetchData(startURL string) []*ParsedPage {
 				parsedPage, err := parsePage(pageURL, page)
 				page.Close()
 				if err != nil {
-					fmt.Printf("Error parsing page: %v\n", err)
+					log.Printf("Error parsing page: %v\n", err)
 					results <- nil
 					continue
 				}
 
-				// fmt.Println(parsedPage.Links)
-				// fmt.Println(parsedPage.Text.String())
+				// log.Println(parsedPage.Links)
+				// log.Println(parsedPage.Text.String())
 
 				var newLinks []string
 
@@ -269,22 +270,24 @@ func main() {
 	dbClient, err := connectToMongoDB(mongoConnectionString)
 
 	if err != nil {
-		fmt.Printf("Error connecting to mongo db: %s\n", err.Error())
+		log.Printf("Error connecting to mongo db: %s\n", err.Error())
 		return
 	}
 
 	db, err := createIndex(dbClient, dbName, ctx)
 
 	if err != nil {
-		fmt.Printf("Error creating collection: %s\n", err.Error())
+		log.Printf("Error creating collection: %s\n", err.Error())
 		return
 	}
+
+
 
 	data := fetchData(startURL)
 	for _, page := range data {
 		err = insertParsedPage(db, ctx, page)
 		if err != nil {
-			fmt.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
+			log.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
 		}
 	}
 
