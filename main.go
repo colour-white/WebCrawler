@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,7 @@ import (
 )
 
 const PageCountToVisit = 100
-const MaxConcurrentRequests = 100
+const MaxConcurrentRequests = 5
 
 type URLSet struct {
 	visited map[string]struct{}
@@ -36,9 +37,10 @@ func (s *URLSet) Add(url string) bool {
 }
 
 type ParsedPage struct {
-	Url   string
-	Links []string
-	Text  strings.Builder
+	Url     string
+	Links   []string
+	Content string
+	Title   string
 }
 
 func parsePage(url string, body io.Reader) (ParsedPage, error) {
@@ -47,6 +49,7 @@ func parsePage(url string, body io.Reader) (ParsedPage, error) {
 
 	z := html.NewTokenizer(body)
 	skipDepth := 0
+	inTitle := false
 	for {
 
 		tt := z.Next()
@@ -63,6 +66,8 @@ func parsePage(url string, body io.Reader) (ParsedPage, error) {
 			switch token.Data {
 			case "script", "style", "noscript", "template":
 				skipDepth++
+			case "title":
+				inTitle = true
 			case "a":
 				for _, attr := range token.Attr {
 					if attr.Key == "href" {
@@ -75,9 +80,14 @@ func parsePage(url string, body io.Reader) (ParsedPage, error) {
 					}
 				}
 			}
+
 		case html.EndTagToken:
 			token := z.Token()
 			switch token.Data {
+
+			case "title":
+				inTitle = false
+
 			case "script", "style", "noscript", "template":
 				if skipDepth > 0 {
 					skipDepth--
@@ -85,16 +95,26 @@ func parsePage(url string, body io.Reader) (ParsedPage, error) {
 			}
 		case html.TextToken:
 
-			if skipDepth == 0 {
-				text := strings.TrimSpace(string(z.Raw()))
-				if text != "" {
-					page.Text.WriteString(text)
-					page.Text.WriteString(" ")
+			text := strings.TrimSpace(string(z.Raw()))
+
+			if inTitle {
+				if page.Title != "" {
+					page.Title += " "
 				}
+				page.Title += text
+				page.Title = strings.TrimSpace(page.Title)
+				continue
 			}
+
+			if skipDepth == 0 && text != "" {
+				if page.Content != "" {
+					page.Content += " "
+				}
+				page.Content += text
+			}
+
 		}
 	}
-
 }
 
 func fetchPage(url string, client *http.Client) (io.ReadCloser, error) {
@@ -139,12 +159,11 @@ func validURL(rawURL string) bool {
 
 	return u.Scheme == "http" || u.Scheme == "https"
 }
-func main() {
+
+func fetchData(startURL string) []*ParsedPage {
 	client := &http.Client{}
 	jobs := make(chan string)
-	results := make(chan []string)
-
-	startURL := "https://books.toscrape.com/"
+	results := make(chan *ParsedPage)
 
 	urlSet := NewURLSet()
 	urlSet.Add(startURL)
@@ -187,7 +206,7 @@ func main() {
 					}
 				}
 
-				results <- newLinks
+				results <- &parsedPage
 			}
 
 		}()
@@ -195,6 +214,7 @@ func main() {
 	}
 
 	queue := []string{startURL}
+	resultsPages := make([]*ParsedPage, 0, PageCountToVisit)
 
 	inFlight := 0
 	visitedCount := 0
@@ -213,10 +233,19 @@ func main() {
 		case jobsChan <- nextURL:
 			queue = queue[1:]
 			inFlight++
-		case newLinks := <-results:
+		case page := <-results:
 			inFlight--
 			visitedCount++
-			queue = append(queue, newLinks...)
+
+			if page == nil {
+				continue
+			}
+			resultsPages = append(resultsPages, page)
+
+			for _, link := range page.Links {
+				queue = append(queue, link)
+			}
+
 		}
 		if visitedCount >= PageCountToVisit {
 			break
@@ -224,5 +253,33 @@ func main() {
 	}
 	close(jobs)
 
-	fmt.Printf("Visited %d pages\n", visitedCount)
+	return resultsPages
+}
+
+func main() {
+	data := fetchData("https://books.toscrape.com/")
+	mongoConnectionString := "mongodb://admin:password123@localhost:27017/"
+	dbName := "WebScraper"
+	ctx := context.Background()
+	dbClient, err := connectToMongoDB(mongoConnectionString)
+
+	if err != nil {
+		fmt.Printf("Error connecting to mongo db: %s\n", err.Error())
+		return
+	}
+
+	db, err := createIndex(dbClient, dbName, ctx)
+
+	if err != nil {
+		fmt.Printf("Error creating collection: %s\n", err.Error())
+		return
+	}
+
+	for _, page := range data {
+		err = insertParsedPage(db, ctx, page)
+		if err != nil {
+			fmt.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
+		}
+	}
+
 }
