@@ -260,9 +260,11 @@ func fetchData(startURL string) []*ParsedPage {
 }
 
 func main() {
-	data := fetchData("https://myanimelist.net/")
+
+	startURL := "https://myanimelist.net/"
 	mongoConnectionString := "mongodb://admin:password123@localhost:27017/"
 	dbName := "WebScraper"
+
 	ctx := context.Background()
 	dbClient, err := connectToMongoDB(mongoConnectionString)
 
@@ -278,6 +280,7 @@ func main() {
 		return
 	}
 
+	data := fetchData(startURL)
 	for _, page := range data {
 		err = insertParsedPage(db, ctx, page)
 		if err != nil {
