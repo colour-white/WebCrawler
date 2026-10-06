@@ -121,6 +121,7 @@ func fetchPage(url string, client *http.Client) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+	request.Header.Set("User-Agent", "MySearchCrawler/0.1")
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -158,7 +159,7 @@ func validURL(rawURL string) bool {
 	return u.Scheme == "http" || u.Scheme == "https"
 }
 
-func fetchData(startURL string) []*ParsedPage {
+func fetchData(startURL string) <-chan *ParsedPage {
 	client := &http.Client{}
 	jobs := make(chan string)
 	results := make(chan *ParsedPage)
@@ -189,9 +190,6 @@ func fetchData(startURL string) []*ParsedPage {
 					continue
 				}
 
-				// log.Println(parsedPage.Links)
-				// log.Println(parsedPage.Text.String())
-
 				var newLinks []string
 
 				for _, link := range parsedPage.Links {
@@ -213,44 +211,46 @@ func fetchData(startURL string) []*ParsedPage {
 	}
 
 	queue := []string{startURL}
-	resultsPages := make([]*ParsedPage, 0, Config.PagesCountToProcess)
+	resultsPages := make(chan *ParsedPage, Config.PagesCountToProcess)
 
 	inFlight := 0
 	visitedCount := 0
 
-	for visitedCount < Config.PagesCountToProcess {
+	go func() {
+		for visitedCount < Config.PagesCountToProcess {
 
-		var jobsChan chan string
-		var nextURL string
+			var jobsChan chan string
+			var nextURL string
 
-		if len(queue) > 0 && inFlight < Config.MaxConcurrentRequests {
-			jobsChan = jobs
-			nextURL = queue[0]
-		}
-
-		select {
-		case jobsChan <- nextURL:
-			queue = queue[1:]
-			inFlight++
-		case page := <-results:
-			inFlight--
-			visitedCount++
-
-			if page == nil {
-				continue
-			}
-			resultsPages = append(resultsPages, page)
-
-			for _, link := range page.Links {
-				queue = append(queue, link)
+			if len(queue) > 0 && inFlight < Config.MaxConcurrentRequests {
+				jobsChan = jobs
+				nextURL = queue[0]
 			}
 
+			select {
+			case jobsChan <- nextURL:
+				queue = queue[1:]
+				inFlight++
+			case page := <-results:
+				inFlight--
+				visitedCount++
+
+				if page == nil {
+					continue
+				}
+				resultsPages <- page
+
+				for _, link := range page.Links {
+					queue = append(queue, link)
+				}
+
+			}
+			if visitedCount >= Config.PagesCountToProcess {
+				break
+			}
 		}
-		if visitedCount >= Config.PagesCountToProcess {
-			break
-		}
-	}
-	close(jobs)
+		close(resultsPages)
+	}()
 
 	return resultsPages
 }
@@ -277,11 +277,13 @@ func main() {
 	}
 
 	data := fetchData(Config.StartURL)
-	for _, page := range data {
-		err = insertParsedPage(db, ctx, page)
-		if err != nil {
-			WarningLog.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
-		}
+	for page := range data {
+		go func() {
+			err = insertParsedPage(db, ctx, page)
+			if err != nil {
+				WarningLog.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
+			}
+		}()
 	}
 
 }
