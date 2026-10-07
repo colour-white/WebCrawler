@@ -58,7 +58,7 @@ func insertParsedPage(db *mongo.Database, ctx context.Context, page *ParsedPage)
 	_, err := webpages.InsertOne(ctx, bson.D{
 		{Key: "title", Value: page.Title},
 		{Key: "content", Value: page.Content},
-		{Key: "url", Value: page.Url},
+		{Key: "url", Value: page.URL},
 	})
 
 	return err

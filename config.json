@@ -8,6 +8,6 @@
     "startURL": "https://myanimelist.net/",
     "workers": 5,
     "pagesCountToProcess": 100,
-    "maxConcurrentRequests": 10,
+    "maxConcurrentRequests": 5,
     "workerCooldown": 1
 }

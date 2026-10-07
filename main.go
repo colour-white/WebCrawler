@@ -6,135 +6,31 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/html"
 )
 
-type URLSet struct {
-	visited map[string]struct{}
-	mu      sync.Mutex
-}
+func fetchPage(ctx context.Context, pageURL string, client *http.Client) (io.ReadCloser, error) {
 
-func NewURLSet() *URLSet {
-	return &URLSet{
-		visited: make(map[string]struct{}),
-	}
-}
-func (s *URLSet) Add(url string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, exists := s.visited[url]; exists {
-		return false
-	}
-	s.visited[url] = struct{}{}
-	return true
-}
-
-type ParsedPage struct {
-	Url     string
-	Links   []string
-	Content string
-	Title   string
-}
-
-func parsePage(url string, body io.Reader) (ParsedPage, error) {
-
-	page := ParsedPage{Url: url}
-
-	z := html.NewTokenizer(body)
-	skipDepth := 0
-	inTitle := false
-	for {
-
-		tt := z.Next()
-
-		switch tt {
-		case html.ErrorToken:
-			if z.Err() == io.EOF {
-				return page, nil
-			}
-			return page, z.Err()
-
-		case html.StartTagToken:
-			token := z.Token()
-			switch token.Data {
-			case "script", "style", "noscript", "template":
-				skipDepth++
-			case "title":
-				inTitle = true
-			case "a":
-				for _, attr := range token.Attr {
-					if attr.Key == "href" {
-						resolvedURL, err := resolveURL(page.Url, attr.Val)
-						if err != nil {
-							ErrorLog.Printf("Error resolving URL: %v\n", err)
-							continue
-						}
-						page.Links = append(page.Links, resolvedURL)
-					}
-				}
-			}
-
-		case html.EndTagToken:
-			token := z.Token()
-			switch token.Data {
-
-			case "title":
-				inTitle = false
-
-			case "script", "style", "noscript", "template":
-				if skipDepth > 0 {
-					skipDepth--
-				}
-			}
-		case html.TextToken:
-
-			text := strings.TrimSpace(string(z.Raw()))
-
-			if inTitle {
-				if page.Title != "" {
-					page.Title += " "
-				}
-				page.Title += text
-				page.Title = strings.TrimSpace(page.Title)
-				continue
-			}
-
-			if skipDepth == 0 && text != "" {
-				if page.Content != "" {
-					page.Content += " "
-				}
-				page.Content += text
-			}
-
-		}
-	}
-}
-
-func fetchPage(url string, client *http.Client) (io.ReadCloser, error) {
-
-	request, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("User-Agent", "MySearchCrawler/0.1")
-
-	response, err := client.Do(request)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	if response.StatusCode != http.StatusOK {
-		response.Body.Close()
-		return nil, fmt.Errorf("failed to retrieve page: %s", response.Status)
+	req.Header.Set("User-Agent", "MySearchCrawler/0.1")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
 
-	return response.Body, nil
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 
+		return nil, fmt.Errorf("failed to retrieve page: %s", resp.Status)
+	}
+
+	return resp.Body, nil
 }
 
 func resolveURL(baseURL, relativeURL string) (string, error) {
@@ -159,131 +55,185 @@ func validURL(rawURL string) bool {
 	return u.Scheme == "http" || u.Scheme == "https"
 }
 
-func fetchData(startURL string) <-chan *ParsedPage {
-	client := &http.Client{}
-	jobs := make(chan string)
-	results := make(chan *ParsedPage)
+func processURL(ctx context.Context,
+	jobs <-chan string, client *http.Client, results chan<- *ParsedPage, wg *sync.WaitGroup) {
 
+	defer wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case pageURL, ok := <-jobs:
+			if !ok {
+				return
+			}
+			InfoLog.Printf("Visiting: %s\n", pageURL)
+
+			body, err := fetchPage(ctx, pageURL, client)
+
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				ErrorLog.Printf("Error fetching %s: %v", pageURL, err)
+			}
+
+			parsedPage, err := parsePage(pageURL, body)
+
+			body.Close()
+
+			if err != nil {
+				ErrorLog.Printf("Error parsing %s: %v", pageURL, err)
+				continue
+			}
+
+			select {
+			case results <- &parsedPage:
+			case <-ctx.Done():
+				return
+			}
+
+			timer := time.NewTimer(time.Second * time.Duration(Config.WorkerCooldown))
+
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			}
+
+		}
+	}
+
+}
+func fetchData(ctx context.Context, startURL string) <-chan *ParsedPage {
+	client := &http.Client{Timeout: 15 * time.Second}
+	jobs := make(chan string)
 	urlSet := NewURLSet()
 	urlSet.Add(startURL)
 
+	results := make(chan *ParsedPage, Config.Workers)
+
+	var wg sync.WaitGroup
 	for range Config.Workers {
-
-		go func() {
-
-			for pageURL := range jobs {
-
-				InfoLog.Printf("Visiting: %s\n", pageURL)
-
-				page, err := fetchPage(pageURL, client)
-				if err != nil {
-					ErrorLog.Printf("Error fetching page: %v\n", err)
-					results <- nil
-					continue
-				}
-
-				parsedPage, err := parsePage(pageURL, page)
-				page.Close()
-				if err != nil {
-					ErrorLog.Printf("Error parsing page: %v\n", err)
-					results <- nil
-					continue
-				}
-
-				var newLinks []string
-
-				for _, link := range parsedPage.Links {
-					if !validURL(link) {
-						continue
-					}
-
-					if urlSet.Add(link) {
-						newLinks = append(newLinks, link)
-					}
-				}
-
-				results <- &parsedPage
-				time.Sleep(time.Second * time.Duration(Config.WorkerCooldown))
-			}
-
-		}()
-
+		wg.Add(1)
+		go processURL(ctx, jobs, client, results, &wg)
 	}
 
-	queue := []string{startURL}
-	resultsPages := make(chan *ParsedPage, Config.PagesCountToProcess)
-
-	inFlight := 0
-	visitedCount := 0
+	output := make(chan *ParsedPage, Config.PagesCountToProcess)
 
 	go func() {
+		defer close(output)
+
+		crawlCtx, cancel := context.WithCancel(ctx)
+
+		defer cancel()
+
+		queue := []string{startURL}
+
+		inFlight := 0
+		visitedCount := 0
+
 		for visitedCount < Config.PagesCountToProcess {
 
-			var jobsChan chan string
+			if len(queue) == 0 && inFlight == 0 {
+				break
+			}
+
+			var jobChan chan string
 			var nextURL string
 
 			if len(queue) > 0 && inFlight < Config.MaxConcurrentRequests {
-				jobsChan = jobs
+				jobChan = jobs
 				nextURL = queue[0]
 			}
 
 			select {
-			case jobsChan <- nextURL:
+			case jobChan <- nextURL:
 				queue = queue[1:]
 				inFlight++
+
 			case page := <-results:
 				inFlight--
-				visitedCount++
-
 				if page == nil {
 					continue
 				}
-				resultsPages <- page
-
-				for _, link := range page.Links {
-					queue = append(queue, link)
+				visitedCount++
+				select {
+				case output <- page:
+				case <-crawlCtx.Done():
+					return
 				}
 
+				for _, link := range page.Links {
+					if !validURL(link) {
+						continue
+					}
+					if urlSet.Add(link) {
+						queue = append(queue, link)
+					}
+				}
 			}
-			if visitedCount >= Config.PagesCountToProcess {
-				break
-			}
+
 		}
-		close(resultsPages)
+
+		cancel()
+		close(jobs)
+		wg.Wait()
+
 	}()
 
-	return resultsPages
+	return output
 }
 
 var Config config
 
 func main() {
-
 	loadConfig("config.json")
 
-	ctx := context.Background()
-	dbClient, err := connectToMongoDB(Config.DB.ConnectionString)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dbClient, err := connectToMongoDB(
+		Config.DB.ConnectionString,
+	)
 
 	if err != nil {
-		ErrorLog.Printf("Error connecting to mongo db: %s\n", err.Error())
+		ErrorLog.Printf(
+			"Error connecting to mongo db: %s",
+			err,
+		)
 		return
 	}
 
-	db, err := createIndex(dbClient, Config.DB.Name, ctx)
+	db, err := createIndex(
+		dbClient,
+		Config.DB.Name,
+		ctx,
+	)
 
 	if err != nil {
-		ErrorLog.Printf("Error creating collection: %s\n", err.Error())
+		ErrorLog.Printf(
+			"Error creating collection: %s",
+			err,
+		)
 		return
 	}
 
-	data := fetchData(Config.StartURL)
+	data := fetchData(ctx, Config.StartURL)
+
 	for page := range data {
-		go func() {
-			err = insertParsedPage(db, ctx, page)
-			if err != nil {
-				WarningLog.Printf("Error inserting data into `webpages` collection: %s\n", err.Error())
-			}
-		}()
+		if err := insertParsedPage(db, ctx, page); err != nil {
+			WarningLog.Printf(
+				"Error inserting data into webpages: %s",
+				err,
+			)
+		}
 	}
-
 }
